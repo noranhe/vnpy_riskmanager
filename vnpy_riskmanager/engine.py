@@ -7,7 +7,7 @@ from vnpy.event import Event, EventEngine
 from vnpy.trader.object import OrderData, OrderRequest, LogData, TradeData
 from vnpy.trader.engine import BaseEngine, MainEngine
 from vnpy.trader.event import EVENT_TRADE, EVENT_ORDER, EVENT_LOG, EVENT_TIMER
-from vnpy.trader.constant import Direction, Status
+from vnpy.trader.constant import Direction, Offset, Status
 from vnpy.trader.utility import load_json, save_json
 
 
@@ -42,6 +42,14 @@ class RiskEngine(BaseEngine):
         self.active_order_limit: int = 50
 
         self.active_order_books: Dict[str, ActiveOrderBook] = {}
+
+        self.open_volumes: Dict[str, int] = defaultdict(int)
+        self.open_limits: Dict[str, int] = {
+            "ZC201.CZCE": 50,
+            "ZC205.CZCE": 50,
+            "j2201.DCE": 100,
+            "j2205.DCE": 100,
+        }
 
         self.load_setting()
         self.register_event()
@@ -125,6 +133,10 @@ class RiskEngine(BaseEngine):
         trade: TradeData = event.data
         self.trade_count += trade.volume
 
+        # 统计合约的开仓成交量
+        if trade.offset == Offset.OPEN:
+            self.open_volumes[trade.vt_symbol] += trade.volume
+
     def process_timer_event(self, event: Event) -> None:
         """"""
         self.order_flow_timer += 1
@@ -190,6 +202,17 @@ class RiskEngine(BaseEngine):
             best_bid = order_book.get_best_bid()
             if best_bid and req.price <= best_bid:
                 self.write_log(f"卖出价格{req.price}小于等于已挂最低买价{best_bid}，可能导致自成交")
+                return False
+
+        # 检查开仓数量限制
+        open_limit = self.open_limits.get(req.vt_symbol, None)
+        open_volume = self.open_volumes[req.vt_symbol]
+
+        self.write_log(f"今日已开仓{open_volume}手，再次开仓{req.volume}手，日内开仓限制{open_limit}")
+
+        if open_limit and req.offset == Offset.OPEN:
+            if open_volume + req.volume >= open_limit:
+                self.write_log(f"委托失败，今日已开仓{open_volume}手，再次开仓{req.volume}手，会超过日内开仓限制{open_limit}")
                 return False
 
         # Add flow count if pass all checks
